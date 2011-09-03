@@ -109,7 +109,13 @@ let mod_prim name =
     fatal_error ("Primitive " ^ name ^ " not found.")
 
 let undefined_location loc =
-  let (fname, line, char) = Location.get_pos_info loc.Location.loc_start in
+  (* Confer Translcore.assert_failed *)
+  let fname = match loc.Location.loc_start.Lexing.pos_fname with
+              | "" -> !Location.input_name
+              | x -> x in
+  let pos = loc.Location.loc_start in
+  let line = pos.Lexing.pos_lnum in
+  let char = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
   Lconst(Const_block(0,
                      [Const_base(Const_string fname);
                       Const_base(Const_int line);
