@@ -39,8 +39,7 @@ libcamlrund.$(A): $(DOBJS)
 	$(CC) $(CFLAGS) $(BYTECCCOMPOPTS) -c $<
 
 .c.$(DBGO):
-	$(CC) $(CFLAGS) $(BYTECCDBGCOMPOPTS) -c $<
-	mv $*.$(O) $*.$(DBGO)
+	$(CC) -o $*.$(DBGO) $(CFLAGS) $(BYTECCDBGCOMPOPTS) -c $<
 
 .depend.nt: .depend
 	rm -f .depend.win32
