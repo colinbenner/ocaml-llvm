@@ -371,6 +371,9 @@ let mk_dstartup f =
   "-dstartup", Arg.Unit f, " (undocumented)"
 ;;
 
+let mk_llvm f =
+  "-llvm", Arg.Unit f, "compile to llvm"
+
 let mk__ f =
   "-", Arg.String f,
   "<file>  Treat <file> as a file name (even if it starts with `-')"
@@ -523,6 +526,7 @@ module type Optcomp_options = sig
   val _dscheduling :  unit -> unit
   val _dlinear :  unit -> unit
   val _dstartup :  unit -> unit
+  val _llvm :  unit -> unit
 
   val anonymous : string -> unit
 end;;
@@ -565,6 +569,7 @@ module type Opttop_options = sig
   val _dscheduling :  unit -> unit
   val _dlinear :  unit -> unit
   val _dstartup :  unit -> unit
+  val _llvm :  unit->unit
 
   val anonymous : string -> unit
 end;;
@@ -734,6 +739,7 @@ struct
     mk_dscheduling F._dscheduling;
     mk_dlinear F._dlinear;
     mk_dstartup F._dstartup;
+    mk_llvm F._llvm;
 
     mk__ F.anonymous;
   ]
@@ -776,6 +782,7 @@ module Make_opttop_options (F : Opttop_options) = struct
     mk_dscheduling F._dscheduling;
     mk_dlinear F._dlinear;
     mk_dstartup F._dstartup;
+    mk_llvm F._llvm;
 
     mk__ F.anonymous;
   ]

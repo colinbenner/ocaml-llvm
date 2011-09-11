@@ -80,6 +80,7 @@ ASMCOMP=asmcomp/arch.cmo asmcomp/debuginfo.cmo \
   asmcomp/reloadgen.cmo asmcomp/reload.cmo \
   asmcomp/printlinear.cmo asmcomp/linearize.cmo \
   asmcomp/schedgen.cmo asmcomp/scheduling.cmo \
+  asmcomp/llvmcompile.cmo \
   asmcomp/emitaux.cmo asmcomp/emit.cmo asmcomp/asmgen.cmo \
   asmcomp/asmlink.cmo asmcomp/asmlibrarian.cmo asmcomp/asmpackager.cmo
 
@@ -722,6 +723,12 @@ clean::
 # Default rules
 
 .SUFFIXES: .ml .mli .cmo .cmi .cmx
+
+asmcomp/asmgen.cmo: asmcomp/llvmcompile.cmo
+asmcomp/asmgen.cmi: asmcomp/llvmcompile.cmi
+asmcomp/asmgen.cmx: asmcomp/llvmcompile.cmx
+
+asmcomp/llvmcompile.cmo: asmcomp/llvmcompile.cmi
 
 .ml.cmo:
 	$(CAMLC) $(COMPFLAGS) -c $<

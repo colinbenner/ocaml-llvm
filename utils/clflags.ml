@@ -75,6 +75,7 @@ let dump_scheduling = ref false         (* -dscheduling *)
 let dump_linear = ref false             (* -dlinear *)
 let keep_startup_file = ref false       (* -dstartup *)
 let dump_combine = ref false            (* -dcombine *)
+let use_llvm = ref false                (* -llvm *)
 
 let native_code = ref false             (* set to true under ocamlopt *)
 let inline_threshold = ref 10
