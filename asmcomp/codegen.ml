@@ -27,6 +27,7 @@ let dump_prefer = ref false
 let dump_regalloc = ref false
 let dump_reload = ref false
 let dump_linear = ref false
+let use_llvm = ref false
 
 let rec regalloc fd =
   if !dump_live then Printmach.phase "Liveness analysis" fd;

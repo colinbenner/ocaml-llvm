@@ -27,3 +27,4 @@ val dump_prefer: bool ref
 val dump_regalloc: bool ref
 val dump_reload: bool ref
 val dump_linear: bool ref
+val use_llvm: bool ref

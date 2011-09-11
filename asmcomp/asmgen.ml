@@ -56,6 +56,9 @@ let rec regalloc ppf round fd =
 let (++) x f = f x
 
 let compile_fundecl (ppf : formatter) fd_cmm =
+  if !use_llvm then
+    print_string (Llvmcompile.compile_fundecl fd_cmm)
+  else
   Reg.reset();
   fd_cmm
   ++ Selection.fundecl
