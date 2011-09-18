@@ -4,7 +4,7 @@ exception Llvm_error of string
 
 let counter = ref 0
 
-let addr_type = "i" ^ string_of_int (8 * Arch.size_addr) ^ "*"
+let addr_type = "addr" (*"i" ^ string_of_int (8 * Arch.size_addr) ^ "*"*)
 let int_type = "i" ^ string_of_int (8 * Arch.size_int)
 let float_type = "double"
 
@@ -29,7 +29,7 @@ let translate_op = function
 
 let translate_mem_chunk = function
   | Single | Double | Double_u -> float_type
-  | Word -> addr_type
+  | Word -> int_type (* should be addr_type *)
   | _ -> int_type
 
 let translate_type = function
@@ -73,6 +73,8 @@ let tbl = Hashtbl.create 10
 
 let ret_val name counter = Some (name ^ counter)
 
+let strip_sigil s = String.sub s 1 (String.length s - 1)
+
 (* returns a tuple of
  -- instructions to execute before using the result of this operation
  -- the virtual register of the result
@@ -82,9 +84,9 @@ let rec compile_expr expr = match expr with
   | Cconst_int i -> "", Some (string_of_int i), Some int_type
   | Cconst_natint i -> "", Some (Nativeint.to_string i), Some int_type
   | Cconst_float f -> "", Some "$float", Some float_type
-  | Cconst_symbol s -> "", Some ("%" ^ s), Some "symbol_type"
-  | Cconst_pointer i -> "", Some (string_of_int i), Some "pointer_type"
-  | Cconst_natpointer i -> "", Some (Nativeint.to_string i), Some "natpointer_type"
+  | Cconst_symbol s -> "", Some ("@" ^ s), Some addr_type
+  | Cconst_pointer i -> "", Some (string_of_int i), Some addr_type
+  | Cconst_natpointer i -> "", Some (Nativeint.to_string i), Some addr_type
 
   | Cvar id -> begin
       let c = counter_inc () in
@@ -96,17 +98,17 @@ let rec compile_expr expr = match expr with
           Some typ
       | None -> raise (Llvm_error ("could not find identifier '" ^ name ^ "'."))
     end
-  | Clet(id,expr1,expr2) -> begin
+  | Clet(id,arg,body) -> begin
       let name = Ident.name id in
-      match compile_expr expr1 with
-      | (instr1, Some res, Some type1) -> begin
-          Hashtbl.add tbl name (Some type1);
-          let (instr2, res2, type2) = compile_expr expr2 in
-          let c = counter_inc () in
-          "\t%" ^ name ^ " = alloca " ^ type1 ^ "\n" ^
-          instr1 ^ "\t%tmp" ^ c ^ " = " ^ res ^ "\n" ^
-          "\tstore " ^ type1 ^ " %tmp" ^ c ^ ", " ^ type1 ^ " %" ^ name ^ "\n" ^ instr2,
-          res2, type2
+      match compile_expr arg with
+      | (instr_arg, Some res_arg, Some type_arg) -> begin
+          Hashtbl.add tbl name (Some type_arg);
+          let (instr_body, res_body, type_body) = compile_expr body in
+          "\t%" ^ name ^ " = alloca " ^ type_arg ^ "\n" ^
+          instr_arg ^
+          "\tstore " ^ type_arg ^ " " ^ res_arg ^ ", " ^ type_arg ^ "* %" ^ name ^ " ;generated for let statement\n" ^
+          instr_body,
+          res_body, type_body
         end
       | _ -> raise (Llvm_error "failed to compile subexpression of let statement")
     end
@@ -124,7 +126,7 @@ let rec compile_expr expr = match expr with
       let c = counter_inc () in
       match exprs with
       | Cconst_symbol s :: rem ->
-          "\t%call_res" ^ c ^ " = call \n",
+          "\t%call_res" ^ c ^ " = call @" ^ s ^ "(...)\n",
           ret_val "%call_res" c, Some (translate_machtype typ)
       | _ ->
           "\t;%apply_res" ^ c ^ " = call ...\n",
@@ -132,7 +134,7 @@ let rec compile_expr expr = match expr with
     end
   | Cop(Cextcall(name, typ, b, debug), exprs) ->
       let c = counter_inc () in
-      "\t%extcall_res" ^ c ^ " = call <return type> \n",
+      "\t%extcall_res" ^ c ^ " = call " ^ translate_machtype typ ^ " ;...\n",
       ret_val "%extcall_res" c, Some (translate_machtype typ)
   | Cop(Calloc, exprs) ->
       let c = counter_inc () in
@@ -142,7 +144,7 @@ let rec compile_expr expr = match expr with
       | (addr_instr, Some addr_res, _), (val_instr, Some val_res, _) ->
           let typ = translate_mem_chunk mem in
           addr_instr ^ val_instr ^
-          "\tstore " ^ typ ^ " " ^ val_res ^ ", " ^ typ ^ " " ^ addr_res ^ "\n", None, None
+          "\tstore " ^ typ ^ " " ^ val_res ^ ", " ^ typ ^ " " ^ addr_res ^ " ;generated from Cstore\n", None, None
       | _ -> raise (Llvm_error "failed to compile subexpression of store statement")
     end
   | Cop(Craise debug, exprs) ->
@@ -179,10 +181,10 @@ let rec compile_expr expr = match expr with
             | (None, Some t2) -> t2, t2 ^ "[ 0, %then" ^ c ^ "], [" ^ res2 ^ ", %else" ^ c ^ "]\n"
             | (None, None) -> raise (Llvm_error "both alternatives never return")) in
           cond_instr ^
-          "\t%cond" ^ c ^ " = bitcast " ^ cond_typ ^ " " ^ cond_res ^ " to i1\n" ^
+          "\t%cond" ^ c ^ " = icmp ne " ^ int_type ^ " 0, " ^ cond_res ^ "\n" ^
           "\tbr i1 %cond" ^ c ^ ", label %then" ^ c ^ ", label %else" ^ c ^ "\n\n" ^
-          "then" ^ c ^ ":\n" ^ instr1 ^ "\tbr %fi" ^ c ^ "\n\n" ^
-          "else" ^ c ^ ":\n" ^ instr2 ^ "\tbr %fi" ^ c ^ "\n\n" ^
+          "then" ^ c ^ ":\n" ^ instr1 ^ "\tbr label %fi" ^ c ^ "\n\n" ^
+          "else" ^ c ^ ":\n" ^ instr2 ^ "\tbr label %fi" ^ c ^ "\n\n" ^
           "fi" ^ c ^ ":\n" ^
           "\t%res" ^ c ^ " = phi " ^ labels,
           ret_val "%res" c, Some typ
@@ -242,7 +244,7 @@ and compile_operation op exprs =
 
   | [arg] -> begin
       match compile_expr arg with
-      | instr, Some res, _ -> begin
+      | instr, Some res, Some typ -> begin
           let c = counter_inc () in
           match op with
           | Cfloatofint ->
@@ -259,10 +261,15 @@ and compile_operation op exprs =
               ret_val "%absf_res" c, Some float_type
           | Cload mem ->
               instr ^
-              "\t%load_res" ^ c ^ " = load " ^ translate_mem_chunk mem ^ " " ^ res ^ "\n",
+              "\t%load_res" ^ c ^ " = load " ^ typ ^ " " ^ res ^ "\n",
               ret_val "%load_res" c, Some (translate_mem_chunk mem)
           | Cnegf ->
-              instr ^ "\t%negf_res" ^ c ^ " = fsub double -0.0, " ^ res ^ "\n", ret_val "%negf_res" c, Some float_type
+              let mask = "0x8" ^ String.make (8 * Arch.size_int) '0' in
+              instr ^
+              "\t%int_of_float" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^
+              "\t%tmp" ^ c ^ " = xor " ^ int_type ^ " " ^ mask ^ ", %int_of_float" ^ c ^
+              "\t%negf_res" ^ c ^ " = uitofp " ^ int_type ^ "%tmp" ^ c ^ " to " ^ float_type ^ "\n",
+              ret_val "%negf_res" c, Some float_type
           | _ -> raise (Llvm_error "wrong op")
         end
       | _ -> raise (Llvm_error "failed to compute argument of unary operator")
