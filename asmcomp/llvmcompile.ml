@@ -83,7 +83,7 @@ let strip_sigil s = String.sub s 1 (String.length s - 1)
 let rec compile_expr expr = match expr with
   | Cconst_int i -> "", Some (string_of_int i), Some int_type
   | Cconst_natint i -> "", Some (Nativeint.to_string i), Some int_type
-  | Cconst_float f -> "", Some "$float", Some float_type
+  | Cconst_float f -> "", Some f, Some float_type
   | Cconst_symbol s -> "", Some ("@" ^ s), Some addr_type
   | Cconst_pointer i -> "", Some (string_of_int i), Some addr_type
   | Cconst_natpointer i -> "", Some (Nativeint.to_string i), Some addr_type
@@ -118,9 +118,11 @@ let rec compile_expr expr = match expr with
           "\t%" ^ Ident.name id ^ " = " ^ instr, Some ("%" ^ Ident.name id), typ
       | _ -> raise (Llvm_error "failed to compile subexpression of assignment")
     end
-  | Ctuple exprs ->
+  | Ctuple [] -> "\t;()\n", None, None
+  | Ctuple exprs -> begin
       let c = counter_inc () in
       "\t;tuple code...\n", ret_val "%tuple_res" c, Some "tuple_type"
+    end
 
   | Cop(Capply(typ, debug), exprs) -> begin
       let c = counter_inc () in
@@ -136,9 +138,36 @@ let rec compile_expr expr = match expr with
       let c = counter_inc () in
       "\t%extcall_res" ^ c ^ " = call " ^ translate_machtype typ ^ " ;...\n",
       ret_val "%extcall_res" c, Some (translate_machtype typ)
-  | Cop(Calloc, exprs) ->
+  | Cop(Calloc, header :: args) -> begin
       let c = counter_inc () in
-      "\t;%alloc_res = ...\n", ret_val "%alloc_res" c, Some addr_type
+      match compile_expr header with
+      | instr, Some res, _ ->
+          let instrs = String.concat "" (List.map (fun arg -> let (a,_,_) = compile_expr arg in a) args) in
+          let other_elements = "" (* TODO handle args *) in
+          let len = List.length (header :: args) in
+          Printf.sprintf ("%s%s\t%%young_ptr_int%s = load %s @caml_young_pointer
+	%%new_young_ptr_int%s = sub %s %%young_ptr_int%s, %i
+	store %s %%new_young_ptr_int%s, %s @caml_young_pointer
+	%%new_young_ptr%s = inttoptr %s %%new_young_ptr_int%s to [%i x %s]*
+	%%header_addr%s = getelementptr [%i x %s]* %%new_young_ptr%s, %s 0%s
+	%%header_addr_int%s = ptrtoint %s %%header_addr%s to %s
+	%%alloc_res_int%s = add %s %%header_addr_int%s, %i
+	%%alloc_res%s = inttoptr %s %%alloc_res_int%s to %s\n")
+          (* TODO check whether we have to call the garbage collector *)
+          instr instrs
+          c addr_type
+          c int_type c len
+          int_type c addr_type
+          c int_type c len int_type
+          c len int_type c int_type other_elements
+          c addr_type c int_type
+          c int_type c Arch.size_int
+          c int_type c addr_type,
+          ret_val "%alloc_res" c, Some addr_type
+      | _ -> raise (Llvm_error "could not compile subexpression of alloc statement")
+    end
+  | Cop (Calloc, []) -> raise (Llvm_error "can not use Calloc with no arguments")
+
   | Cop(Cstore mem, [addr; value]) -> begin
       match (compile_expr addr, compile_expr value) with
       | (addr_instr, Some addr_res, _), (val_instr, Some val_res, _) ->
@@ -147,9 +176,15 @@ let rec compile_expr expr = match expr with
           "\tstore " ^ typ ^ " " ^ val_res ^ ", " ^ typ ^ " " ^ addr_res ^ " ;generated from Cstore\n", None, None
       | _ -> raise (Llvm_error "failed to compile subexpression of store statement")
     end
-  | Cop(Craise debug, exprs) ->
+  | Cop(Craise debug, [arg]) -> begin
+      match compile_expr arg with
+      | instr, Some res, _ ->
 (*      let c = counter_inc () in*)
-      "\tunwind ;raise exception...\n", None, Some "" (* void *)
+          instr ^
+          "\tunwind ;raise exception..." ^ res ^ "\n", None, Some "" (* void *)
+      | _ -> raise (Llvm_error "could not compile subexpression of raise")
+    end
+  | Cop(Craise _, _) -> raise (Llvm_error "wrong number of arguments for Craise")
   | Cop(Ccheckbound debug, exprs) ->
       let c = counter_inc () in
       "\t;check bound...\n", ret_val "%checkbound_res" c, None
@@ -176,9 +211,9 @@ let rec compile_expr expr = match expr with
             | None -> "0") in
           let typ, labels = (
             match (type1, type2) with
-            | (Some t1, Some t2) -> t1, t1 ^ "[ " ^ res1 ^ ", %then" ^ c ^ "], [" ^ res2 ^ ", %else" ^ c ^ "]\n"
-            | (Some t1, None) -> t1, t1 ^ "[ " ^ res1 ^ ", %then" ^ c ^ "], [ 0, %else" ^ c ^ "]\n"
-            | (None, Some t2) -> t2, t2 ^ "[ 0, %then" ^ c ^ "], [" ^ res2 ^ ", %else" ^ c ^ "]\n"
+            | (Some t1, Some t2) -> t1, t1 ^ " [" ^ res1 ^ ", %then" ^ c ^ "], [" ^ res2 ^ ", %else" ^ c ^ "]\n"
+            | (Some t1, None) -> t1, t1 ^ " [" ^ res1 ^ ", %then" ^ c ^ "], [ 0, %else" ^ c ^ "]\n"
+            | (None, Some t2) -> t2, t2 ^ " [0, %then" ^ c ^ "], [" ^ res2 ^ ", %else" ^ c ^ "]\n"
             | (None, None) -> raise (Llvm_error "both alternatives never return")) in
           cond_instr ^
           "\t%cond" ^ c ^ " = icmp ne " ^ int_type ^ " 0, " ^ cond_res ^ "\n" ^
@@ -254,21 +289,21 @@ and compile_operation op exprs =
               instr ^ "\t%int_of_float" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^ "\n",
               ret_val "%int_of_float" c, Some int_type
           | Cabsf ->
-              let mask = "0x7" ^ String.make (8 * Arch.size_int) 'f' in
-              instr ^ "\t%tmp" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^
-              "\t%tmp2" ^ c ^ " = and " ^ int_type ^ " " ^ mask ^ ", %tmp" ^ c ^
-              "\t%absf_res" ^ c ^ " = uitofp " ^ int_type ^ "%tmp2" ^ c ^ " to " ^ float_type ^ "\n",
+              let mask = "0x7" ^ String.make (2 * Arch.size_int) 'f' in
+              instr ^ "\t%tmp" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^ "\n" ^
+              "\t%tmp2" ^ c ^ " = and " ^ int_type ^ " " ^ mask ^ ", %tmp" ^ c ^ "\n" ^
+              "\t%absf_res" ^ c ^ " = uitofp " ^ int_type ^ " %tmp2" ^ c ^ " to " ^ float_type ^ "\n",
               ret_val "%absf_res" c, Some float_type
           | Cload mem ->
               instr ^
               "\t%load_res" ^ c ^ " = load " ^ typ ^ " " ^ res ^ "\n",
               ret_val "%load_res" c, Some (translate_mem_chunk mem)
           | Cnegf ->
-              let mask = "0x8" ^ String.make (8 * Arch.size_int) '0' in
+              let mask = "0x8" ^ String.make (2 * Arch.size_int) '0' in
               instr ^
-              "\t%int_of_float" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^
-              "\t%tmp" ^ c ^ " = xor " ^ int_type ^ " " ^ mask ^ ", %int_of_float" ^ c ^
-              "\t%negf_res" ^ c ^ " = uitofp " ^ int_type ^ "%tmp" ^ c ^ " to " ^ float_type ^ "\n",
+              "\t%int_of_float" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^ "\n" ^
+              "\t%tmp" ^ c ^ " = xor " ^ int_type ^ " " ^ mask ^ ", %int_of_float" ^ c ^ "\n" ^
+              "\t%negf_res" ^ c ^ " = uitofp " ^ int_type ^ " %tmp" ^ c ^ " to " ^ float_type ^ "\n",
               ret_val "%negf_res" c, Some float_type
           | _ -> raise (Llvm_error "wrong op")
         end
