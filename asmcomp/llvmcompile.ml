@@ -4,8 +4,8 @@ exception Llvm_error of string
 
 let counter = ref 0
 
-let addr_type = "addr" (*"i" ^ string_of_int (8 * Arch.size_addr) ^ "*"*)
 let int_type = "i" ^ string_of_int (8 * Arch.size_int)
+let addr_type = int_type ^ "*"
 let float_type = "double"
 
 (* {{{ *)
@@ -289,7 +289,7 @@ and compile_operation op exprs =
               instr ^ "\t%int_of_float" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^ "\n",
               ret_val "%int_of_float" c, Some int_type
           | Cabsf ->
-              let mask = "0x7" ^ String.make (2 * Arch.size_int) 'f' in
+              let mask = Nativeint.to_string (Nativeint.of_string ("0x7" ^ String.make (2 * Arch.size_int - 1) 'f')) in
               instr ^ "\t%tmp" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^ "\n" ^
               "\t%tmp2" ^ c ^ " = and " ^ int_type ^ " " ^ mask ^ ", %tmp" ^ c ^ "\n" ^
               "\t%absf_res" ^ c ^ " = uitofp " ^ int_type ^ " %tmp2" ^ c ^ " to " ^ float_type ^ "\n",
@@ -299,7 +299,7 @@ and compile_operation op exprs =
               "\t%load_res" ^ c ^ " = load " ^ typ ^ " " ^ res ^ "\n",
               ret_val "%load_res" c, Some (translate_mem_chunk mem)
           | Cnegf ->
-              let mask = "0x8" ^ String.make (2 * Arch.size_int) '0' in
+              let mask = Nativeint.to_string (Nativeint.of_string ("0x8" ^ String.make (2 * Arch.size_int - 1) '0')) in
               instr ^
               "\t%int_of_float" ^ c ^ " = fptosi " ^ float_type ^ " " ^ res ^ " to " ^ int_type ^ "\n" ^
               "\t%tmp" ^ c ^ " = xor " ^ int_type ^ " " ^ mask ^ ", %int_of_float" ^ c ^ "\n" ^
