@@ -733,12 +733,6 @@ clean::
 
 .SUFFIXES: .ml .mli .cmo .cmi .cmx
 
-asmcomp/asmgen.cmo: asmcomp/llvmcompile.cmo
-asmcomp/asmgen.cmi: asmcomp/llvmcompile.cmi
-asmcomp/asmgen.cmx: asmcomp/llvmcompile.cmx
-
-asmcomp/llvmcompile.cmo: asmcomp/llvmcompile.cmi
-
 .ml.cmo:
 	$(CAMLC) $(COMPFLAGS) -c $<
 
