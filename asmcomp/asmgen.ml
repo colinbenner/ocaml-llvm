@@ -56,9 +56,6 @@ let rec regalloc ppf round fd =
 let (++) x f = f x
 
 let compile_fundecl (ppf : formatter) fd_cmm =
-  if !use_llvm then
-    print_string (Llvmcompile.compile_fundecl fd_cmm)
-  else
   Reg.reset();
   fd_cmm
   ++ Selection.fundecl
@@ -82,6 +79,11 @@ let compile_fundecl (ppf : formatter) fd_cmm =
 
 let compile_phrase ppf p =
   if !dump_cmm then fprintf ppf "%a@." Printcmm.phrase p;
+  if !use_llvm then
+  match p with
+  | Cfunction fd -> Llvmcompile.compile_fundecl (*ppf*) fd
+  | Cdata dl -> Llvmcompile.data dl
+  else
   match p with
   | Cfunction fd -> compile_fundecl ppf fd
   | Cdata dl -> Emit.data dl
