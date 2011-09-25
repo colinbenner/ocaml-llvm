@@ -445,16 +445,53 @@ let compile_fundecl fd_cmm =
       end;
       emit "}"
 
+let translate_data = function
+  | Csingle s -> "float", s
+  | Cdouble s -> float_type, s
+  | Cint8 i -> "i8", string_of_int i
+  | Cint16 i -> "i16", string_of_int i
+  | Cint32 i -> "i32", Nativeint.to_string i
+  | Cint i -> int_type, Nativeint.to_string i
+  | Cstring s -> "[" ^ string_of_int (String.length s) ^ " x i8]", "c\"" ^ s ^ "\""
+  | Calign i -> "void", "align " ^ string_of_int i
+  | Cskip i -> "void", "skip " ^ string_of_int i
+  | Cdefine_symbol s ->
+      let typ = try Hashtbl.find tbl s with Not_found -> "unknown" in
+      typ, s
+  | _ -> "not implemented", "not implemented"
 
+let data_to_string = function
+  | Cdefine_symbol s -> "(define-symbol " ^ s ^ ")"
+  | Cglobal_symbol s -> "(global-symbol " ^ s ^ ")"
+  | Cdefine_label i -> "(define-label " ^ string_of_int i ^ ")"
+  | Cint8 i -> "(int8 " ^ string_of_int i ^ ")"
+  | Cint16 i -> "(int16 " ^ string_of_int i ^ ")"
+  | Cint32 i -> "(int32 " ^ Nativeint.to_string i ^ ")"
+  | Cint i -> "(word " ^ Nativeint.to_string i ^ ")"
+  | Csingle s -> "c\"" ^ s ^ "\""
+  | Cdouble s -> float_type ^ " " ^ s
+  | Csymbol_address s -> "(symbol-address " ^ s ^ ")"
+  | Clabel_address i -> "(label-address " ^ string_of_int i ^ ")"
+  | Cstring s -> "(string " ^ s ^ ")"
+  | Cskip i -> "(skip " ^ string_of_int i ^ ")"
+  | Calign i -> "(align " ^ string_of_int i ^ ")"
 
 let data d =
   match d with
   | [] -> emit "; no data"
-  | Cint header :: Cglobal_symbol name :: rem ->
-      emit (";@" ^ name ^ " = global {" ^ int_type ^ ", ...} {" ^ Nativeint.to_string header ^ ", ...}")
-  | Cint header :: Cdefine_symbol name :: rem ->
-      emit (";@" ^ name ^ " = private {" ^ int_type ^ ", ...} {" ^ Nativeint.to_string header ^ ", ...}")
-  | _ -> emit "; different kind of data..."
+  | Cint header :: Cglobal_symbol name :: body ->
+      Hashtbl.add tbl name "i64";
+      let (types, values) = List.fold_left (fun (a,b) (c,d) -> a @ [c], b @ [c ^ " " ^ d]) ([], [])
+                              (List.map translate_data (Cint header :: body)) in
+      emit (";@" ^ name ^ " = global {" ^ String.concat ", " types ^ "} {" ^
+            String.concat ", " values ^ "}")
+  | Cint header :: Cdefine_symbol name :: body ->
+      Hashtbl.add tbl name "i64";
+      let (types, values) = List.fold_left (fun (a,b) (c,d) -> a @ [c], b @ [c ^ " " ^ d]) ([], [])
+                              (List.map translate_data (Cint header :: body)) in
+      emit (";@" ^ name ^ " = global {" ^ String.concat ", " types ^ "} {" ^
+            String.concat ", " values ^ "}")
+  | data -> emit (String.concat " " (List.map data_to_string data))
 (*  emit ("(" ^ String.concat "\n" (List.map (fun x -> counter_inc ();
   match x with
   | Cdefine_symbol s -> "@" ^ s ^ " = external global " ^ int_type
