@@ -125,6 +125,11 @@ let compile_implementation ?toplevel prefixname ppf (size, lam) =
             (List.map Primitive.native_name !Translmod.primitive_declarations))
       );
 
+    if !use_llvm then begin
+    Llvmcompile.emit_function_declarations ();
+    Llvmcompile.emit_constant_declarations ();
+    print_endline (Llvmcompile.instructions ());
+    end else ();
     Emit.end_assembly();
     close_out oc
   with x ->

@@ -3,6 +3,10 @@ open Cmm
 exception Llvm_error of string
 
 let counter = ref 0
+let instrs = ref ([] : string list)
+
+let instructions () =
+  String.concat "\n" (List.rev !instrs)
 
 let size_int = 8 * Arch.size_int
 let size_float = 8 * Arch.size_float
@@ -17,7 +21,7 @@ let translate_op = function
   | Caddi -> "add"
   | Csubi -> "sub"
   | Cmuli -> "mul"
-  | Cdivi -> "div"
+  | Cdivi -> "sdiv"
   | Cmodi -> "srem"
   | Cand  -> "and"
   | Cor   -> "or"
@@ -71,7 +75,7 @@ let translate_machtype typ = String.concat ", " (List.map (function
 (* {{{ *)
 let counter_inc () = counter := !counter + 1
 
-let tbl = Hashtbl.create 10
+let types = Hashtbl.create 10
 
 let ret_val name counter = Some (name ^ counter)
 
@@ -98,7 +102,7 @@ let is_arg name = let rec find_name = function
   | head :: tail -> if compare name head == 0 then true else find_name tail in
   find_name !current_args
 
-let emit str = print_endline str
+let emit str = instrs := str :: !instrs
 
 let c () = string_of_int !counter
 (* }}} *)
@@ -142,6 +146,9 @@ let ptrtoint_const (value,typ) dest_type = "ptrtoint(" ^ typ ^ " " ^ value ^ " t
 let binop op typ left right =
   emit ("\t%binop_res" ^ c () ^ " = " ^ op ^ " " ^ typ ^ " " ^ left ^ ", " ^ right);
   "%binop_res" ^ c (), typ
+let getelementptr (addr, addr_type) (offset, offset_type) =
+  emit ("\t%ptr" ^ c () ^ " = getelementptr " ^ addr_type ^ " " ^ addr ^ ", " ^ offset_type ^ " " ^ offset);
+  "%ptr" ^ c (), addr_type
 (* }}} *)
 
 
@@ -155,27 +162,56 @@ let to_addr (value, typ) dest_type =
             else raise (Llvm_error ("trying to cast float " ^ value ^ " to " ^ dest_type))
 
 let adjust_length (value, typ) dest_type =
-  let src_len = int_of_string (String.sub typ 1 (String.length typ - 1)) in
-  let dest_len = int_of_string (String.sub dest_type 1 (String.length dest_type - 1)) in
+  let src_len = try int_of_string (String.sub typ 1 (String.length typ - 1))
+                with Failure s -> raise (Llvm_error ("could not convert src_len ("^typ^") to int")) in
+  let dest_len = try int_of_string (String.sub dest_type 1 (String.length dest_type - 1))
+                 with Failure s->raise(Llvm_error("could not convert dest_len ("^dest_type^") to int")) in
   if src_len == dest_len
   then value, dest_type
   else if src_len > dest_len
        then convert "trunc" (value, typ) dest_type
        else convert "zext" (value, typ) dest_type
 
-let to_int (value, typ) dest_type =
-  if String.compare typ dest_type == 0
-  then value
-  else (counter_inc (); if is_addr typ
-       then fst (ptrtoint (value,typ) dest_type)
-       else if is_float typ
-            then fst (bitcast (value, typ) dest_type)
-            else fst (adjust_length (value, typ) dest_type))
+let to_int (value, typ) =
+  if is_int typ
+  then (value, typ)
+  else begin
+    counter_inc ();
+    if is_addr typ
+    then ptrtoint (value,typ) int_type
+    else if is_float typ
+         then bitcast (value, typ) float_sized_int
+         else adjust_length (value, typ) int_type
+  end
 
 let to_float (value, typ) =
   if compare typ float_type == 0
   then value
   else (emit ";converting to float..."; fst (bitcast (value,typ) float_type))
+
+let translate_symbol s =
+  let result = ref "" in
+  for i = 0 to String.length s - 1 do
+    let c = s.[i] in
+    match c with
+      'A'..'Z' | 'a'..'z' | '0'..'9' | '_' ->
+          result := !result ^ Printf.sprintf "%c" c
+    | _ -> result := !result ^ Printf.sprintf "$%02x" (Char.code c)
+  done;
+  !result
+
+let constants = ref ([] : string list)
+let functions = ref ([] : (string * string list) list)
+
+let add_const str =
+  if List.exists (fun x -> String.compare x str == 0) !constants
+  then ()
+  else constants := str :: !constants
+
+let add_function (str, args) =
+  if List.exists (fun (x,_) -> String.compare x str == 0) !functions
+  then ()
+  else functions := (str, List.map (fun _ -> addr_type) args) :: !functions
 
 (* returns a tuple of
  -- instructions to execute before using the result of this operation
@@ -186,18 +222,18 @@ let rec compile_expr expr = match expr with
   | Cconst_int i        -> Some (string_of_int i, int_type)
   | Cconst_natint i     -> Some (Nativeint.to_string i, int_type)
   | Cconst_float f      -> Some (f, float_type)
-  | Cconst_symbol s     -> Some ("@" ^ s, addr_type)
+  | Cconst_symbol s     -> add_const s; Some ("@" ^ translate_symbol s, addr_type)
   | Cconst_pointer i    -> Some (inttoptr_const (string_of_int i) addr_type, addr_type)
   | Cconst_natpointer i -> Some (inttoptr_const (Nativeint.to_string i) addr_type, addr_type)
 
   | Cvar id -> begin
       counter_inc ();
       let name = Ident.name id in
-      let typ = try Hashtbl.find tbl name
+      let typ = try Hashtbl.find types name
                 with Not_found -> raise (Llvm_error ("Could not find identifier " ^ name ^ ".")) in
       if is_arg name
-      then Some ("%" ^ name, typ)
-      else Some (load ("%" ^ name, typ ^ "*"))
+      then Some ("%" ^ translate_symbol name, typ)
+      else Some (load ("%" ^ translate_symbol name, typ ^ "*"))
     end
   | Clet(id,arg,body) -> begin
       let name = Ident.name id in
@@ -205,21 +241,26 @@ let rec compile_expr expr = match expr with
       | Some (res_arg, type_arg) -> begin
           counter_inc ();
           let typ = if is_float type_arg then float_type else int_type in
-          Hashtbl.add tbl name typ;
-          let res, typ = alloca ("%" ^ name) typ in
-          let body_ret = compile_expr body in
-          store (to_int (res_arg, type_arg) int_type(* TODO handle floats *), int_type) ("%" ^ name, typ);
-          body_ret
+          let res, typ = if Hashtbl.mem types name
+                         then res_arg, typ ^ "*"
+                         else begin
+                           Hashtbl.add types name typ;
+                           alloca ("%" ^ translate_symbol name) typ
+                         end in
+          store (to_int (res_arg, type_arg)) ("%" ^ name, typ);
+          compile_expr body
         end
       | _ -> raise (Llvm_error "failed to compile argument of let statement")
     end
   | Cassign(id,expr) -> begin
       match compile_expr expr with
       | Some (res, typ) ->
+          emit "; assignment";
           counter_inc ();
           let name = Ident.name id in
-          let typ = "BLABLA"(*try Hashtbl.find tbl name with Not_found -> raise (Llvm_error ("not found: " ^ name))*)in
-          store (res,typ) ("%" ^ name, typ);
+          let typ = try Hashtbl.find types name
+                    with Not_found -> raise (Llvm_error ("not found: " ^ name)) in
+          store (res,typ) ("%" ^ name, typ ^ "*");
           None
       | _ -> raise (Llvm_error "failed to compile subexpression of assignment")
     end
@@ -233,36 +274,57 @@ let rec compile_expr expr = match expr with
   | Cop(Capply(typ, debug), exprs) -> begin
       counter_inc ();
       match exprs with
-      | Cconst_symbol s :: rem ->
+      | Cconst_symbol s :: res ->
           let results =
             List.map (fun x -> match compile_expr x with
                         | Some res -> addr_type ^ " " ^ to_addr res addr_type
-                        | None -> raise (Llvm_error "could not compile argument")) rem in
+                        | None -> raise (Llvm_error "could not compile argument")) res in
           counter_inc ();
+          add_function (s, results);
           emit ("\t%call_res" ^ c () ^ " = call " ^ addr_type ^ " @" ^ s ^ "(" ^ String.concat ", " results ^ ")");
           Some ("%call_res" ^ c (), addr_type)
-      | _ ->
-          emit ("\t;%call_res" ^ c () ^ " = call " ^ addr_type ^ " @bla()...");
-          Some ("%call_res" ^ c (), addr_type)
+      | ptr :: res -> begin
+          match compile_expr ptr with
+          | Some (fn, _) ->
+              let results =
+                List.map (fun x -> match compile_expr x with
+                            | Some res -> addr_type ^ " " ^ to_addr res addr_type
+                            | None -> raise (Llvm_error "could not compile argument")) res in
+              counter_inc ();
+              emit ("\t%call_res" ^ c () ^ " = call " ^ addr_type ^ " " ^ fn ^ "(" ^ String.concat ", " results ^ ")");
+              Some ("%call_res" ^ c (), addr_type)
+          | None -> raise (Llvm_error "could not compute the function's address")
+        end
+      | [] -> raise (Llvm_error "no function specified")
     end
-  | Cop(Cextcall(name, typ, b, debug), exprs) ->
+  | Cop(Cextcall(fn, typ, alloc, debug), exprs) ->
       counter_inc ();
-      emit ("\t%extcall_res" ^ c () ^ " = call " ^ addr_type ^ " ;...");
+      let args =
+        List.map (fun x -> match compile_expr x with
+                    | Some res -> addr_type ^ " " ^ to_addr res addr_type
+                    | None -> raise (Llvm_error "could not compile argument")) exprs in
+      add_function (fn, args);
+      (* TODO store caml_last_return_address, caml_bottom_of_stack,
+      * caml_young_ptr, caml_exception_pointer *)
+      emit ("\t%extcall_res" ^ c () ^ " = call ccc " ^ addr_type ^ " @" ^ fn ^ "(" ^ String.concat "," args ^ ")");
+      (* TODO load caml_young_ptr *)
       Some ("%extcall_res" ^ c (), addr_type)
   | Cop(Calloc, header :: args) -> begin
       match compile_expr header with
       | Some (res, typ) ->
+          emit "; begin allocation";
           counter_inc ();
           let len = string_of_int (Arch.size_int * List.length (header :: args)) in
+          add_const "caml_young_pointer";
           let (res, _) = load ("@caml_young_pointer", addr_type) in
           emit ("\t%new_young_ptr_int" ^ c () ^ " = sub " ^ int_type ^ " " ^ res ^ ", " ^ len);
           (* TODO check whether we have to call the garbage collector *)
           emit ("\t; if %new_young_ptr_int < @caml_young_limit then run gc");
           store ("%new_young_ptr_int" ^ c (), int_type) ("@caml_young_pointer", addr_type);
           let (res_header, typ) = inttoptr ("%new_young_ptr_int" ^ c ()) addr_type in
-          let (res, typ) = ptrtoint (res_header, typ) int_type in
-          let res = "%alloc_res_int" ^ c () in
-          emit ("\t" ^ res ^ " = add " ^ typ ^ " " ^ res ^ ", " ^ string_of_int size_int);
+          let (res_ptr, typ) = ptrtoint (res_header, typ) int_type in
+          let (res, _) = binop "add" typ res_ptr (string_of_int size_int) in
+(*          emit ("\t" ^ res ^ " = add " ^ typ ^ " " ^ res_ptr ^ ", " ^ string_of_int size_int);*)
           counter_inc ();
           (* TODO store header *)
           let (res, typ) = inttoptr res addr_type in
@@ -274,8 +336,9 @@ let rec compile_expr expr = match expr with
           let emit_arg (x, typ) = counter_inc(); num := !num + 1; let num = string_of_int !num in
             emit ("\t%elemptr." ^ num ^ "." ^ c () ^ " = getelementptr " ^ addr_type ^ " " ^ res_header ^
             ", " ^ int_type ^ " " ^ num);
-            store (to_int (x, typ) int_type(*FIXME*), int_type) ("%elemptr." ^ num ^ "." ^ c (), addr_type) in
+            store (to_int (x, typ)) ("%elemptr." ^ num ^ "." ^ c (), addr_type) in
           List.iter emit_arg args;
+          emit "; end allocation";
           Some (res, typ)
       | _ -> raise (Llvm_error "could not compile subexpression of alloc statement")
     end
@@ -295,21 +358,43 @@ let rec compile_expr expr = match expr with
   | Cop(Craise debug, [arg]) -> begin
       match compile_expr arg with
       | Some (res, typ) ->
+          emit "; rasing exception";
           counter_inc ();
           emit ("\tunwind ;raise exception..." ^ res);
           None
       | _ -> raise (Llvm_error "could not compile subexpression of raise")
     end
   | Cop(Craise _, _) -> raise (Llvm_error "wrong number of arguments for Craise")
-  | Cop(Ccheckbound debug, exprs) ->
-      counter_inc ();
-      emit "\t;check bound...";
-      Some ("%checkbound_res" ^ c (), "UNDEFINED")
+  | Cop(Ccheckbound debug, [arr; index]) -> begin
+      match (compile_expr arr, compile_expr index) with
+      | Some (res_arr, type_arr), Some (res_index, type_index) ->
+          counter_inc ();
+          emit ("\t;checking bounds of " ^ res_arr);
+          let (header, _) = getelementptr (to_addr (res_arr, type_arr) addr_type, addr_type)
+                              ("-" ^ string_of_int Arch.size_addr, int_type) in
+          let (length, _) = load (header, addr_type) in
+          let (res, typ) = binop "lshr" int_type length "10" in
+          counter_inc ();
+          let (res, typ) = binop "shl" typ res "3" in
+          counter_inc ();
+          let (res, typ) = binop "sub" typ res "1" in
+          counter_inc ();
+          let (cond, _) = binop "icmp ule" typ res_index res in
+          emit ("\tbr i1 " ^ cond ^ ", label %out_of_bounds" ^ c () ^ ", label %ok" ^ c ());
+          emit ("out_of_bounds" ^ c () ^ ":");
+          add_function ("caml_ml_array_bound_error", []);
+          emit ("\t%res_call" ^ c () ^ " = call " ^ addr_type ^ " @caml_ml_array_bound_error()");
+          emit ("\tbr label %ok" ^ c ());
+          emit ("ok" ^ c () ^ ":");
+          None
+      | _, _ -> raise (Llvm_error "could not compile array or index argument of checkbound")
+    end
+  | Cop(Ccheckbound _, _) -> raise (Llvm_error "not implemented: checkound with #args != 2")
   | Cop(op, exprs) -> compile_operation op exprs
 
-  | Csequence(expr1,expr2) ->
-      ignore (compile_expr expr1);
-      compile_expr expr2
+  | Csequence(fst,snd) ->
+      ignore (compile_expr fst);
+      compile_expr snd
   | Cifthenelse(cond, expr1, expr2) -> begin
       match compile_expr cond with
       | Some (cond_res, _) -> begin
@@ -323,12 +408,12 @@ let rec compile_expr expr = match expr with
           match compile_expr expr1 with
           | Some (res1, type1) -> begin
               counter_inc ();
-              store (res1, int_type) (if_res, res_type);
+              store (to_int (res1, type1)) (if_res, res_type);
               emit ("\tbr label %fi" ^ c ^ "\n");
               emit ("else" ^ c ^ ":");
               match compile_expr expr2 with
               | Some (res2, type2) ->
-                  store (res2, int_type) ("%if_res" ^ c, addr_type);
+                  store (to_int (res2, type2)) (if_res, addr_type);
               | None -> ()
             end
           | None -> begin
@@ -336,7 +421,7 @@ let rec compile_expr expr = match expr with
               emit ("else" ^ c ^ ":");
               match compile_expr expr2 with
               | Some (res2, type2) ->
-                  store (res2, int_type) (if_res, res_type);
+                  store (to_int (res2, type2)) (if_res, addr_type);
               | None -> ()
             end
           end;
@@ -355,16 +440,38 @@ let rec compile_expr expr = match expr with
       | _ -> raise (Llvm_error "could not compute subexpression of switch statement")
     end
   | Cloop expr -> begin
+      emit "; begin of loop";
       let c = c () in
       counter_inc ();
+      emit ("\tbr label %loop" ^ c);
       emit ("loop" ^ c ^ ":");
       ignore(compile_expr expr);
-      emit ("\tbr %loop" ^ c);
+      emit ("\tbr label %loop" ^ c);
+      emit ("\tunreachable");
+      counter_inc ();
+      emit "; end of loop";
       None
     end
-  | Ccatch(i,ids,expr1,expr2) -> emit "\t;catch..."; Some ("%catch_res", "UNDEFINED")
-  | Cexit(i,exprs) -> emit "\t;exit..."; Some ("%exit_res", "UNDEFINED")
-  | Ctrywith(expr1,id,expr2) -> emit "\t;try ... with ..."; Some ("%try_with_res", "UNDEFINED")
+  | Ccatch(i,ids,expr1,expr2) ->
+      counter_inc ();
+      emit ("\t; catch " ^ string_of_int i);
+      emit "; expression 1";
+      ignore (compile_expr expr1);
+      emit "; expression 2";
+      ignore (compile_expr expr2);
+      emit ("\tbr label %exit" ^ string_of_int i);
+      emit ("exit" ^ string_of_int i ^ ":");
+      Some ("%catch_res", int_type)
+  | Cexit(i,exprs) ->
+      counter_inc ();
+      emit ("\t; exit " ^ string_of_int i);
+      emit ("\t; expressions...");
+      emit ("\tbr label %exit" ^ string_of_int i);
+      None
+  | Ctrywith(expr1,id,expr2) ->
+      counter_inc ();
+      emit "\t; try-with-statament";
+      Some ("%try_with_res", int_type)
 
 and compile_operation op exprs =
   match exprs with
@@ -374,11 +481,17 @@ and compile_operation op exprs =
           counter_inc ();
           match op with
           | Caddi|Csubi|Cmuli|Cdivi|Cmodi|Cand|Cor|Cxor|Clsl|Clsr|Casr ->
-              Some (binop (translate_op op) int_type (to_int (lres, ltype) int_type) (to_int (rres, rtype) int_type))
+              Some (binop (translate_op op) int_type
+                      (fst (to_int (lres, ltype)))
+                      (fst (to_int (rres, rtype))))
           |Caddf|Csubf|Cmulf|Cdivf ->
-              Some (binop (translate_op op) float_type (to_float (lres, ltype)) (to_float (rres, rtype)))
+              Some (binop (translate_op op) float_type
+                      (to_float (lres, ltype))
+                      (to_float (rres, rtype)))
           | Ccmpi op ->
-              let (res,_) = binop ("icmp " ^ translate_icomp op) int_type (to_int (lres, ltype) int_type) (to_int (rres, rtype) int_type) in
+              let (res,_) = binop ("icmp " ^ translate_icomp op) int_type
+                              (fst (to_int (lres, ltype)))
+                              (fst (to_int (rres, rtype))) in
               Some (convert "zext" (res,"i1") int_type)
           | Ccmpf op ->
               let left = to_float (lres, ltype) in
@@ -386,13 +499,14 @@ and compile_operation op exprs =
               let (res,_) = binop ("fcmp " ^ translate_fcomp op) float_type left right in
               Some (convert "zext" (res,"i1") int_type)
           | Ccmpa op ->
-              let left = to_int (lres, ltype) int_type in
-              let right = to_int (rres, rtype) int_type in
+              let left, _ = to_int (lres, ltype) in
+              let right, _ = to_int (rres, rtype) in
               let (res,_) = binop ("icmp " ^ translate_ucomp op) int_type left right in
               Some (convert "zext" (res,"i1") int_type)
           | Cadda | Csuba ->
-              (* TODO use getelementptr for pointer arithmetic*)
-              let (res, typ) = binop "add" int_type (to_int (lres, ltype) int_type) (to_int (rres, rtype) int_type) in
+              let (res, typ) = binop "add" int_type
+                                 (fst (to_int (lres, ltype)))
+                                 (fst (to_int (rres, rtype))) in
               Some (inttoptr res (if is_addr ltype then ltype else rtype))
           | _ -> raise (Llvm_error "Not a binary operator")
           end
@@ -410,18 +524,18 @@ and compile_operation op exprs =
               Some (convert "fptosi" (res,float_type) int_type);
           | Cabsf ->
               let mask = Nativeint.to_string (Nativeint.of_string ("0x7" ^ String.make (2 * Arch.size_int - 1) 'f')) in
-              let (res,_) = binop "and " float_sized_int mask (to_int (res,typ) float_sized_int) in
+              let (res,_) = binop "and " float_sized_int mask (fst (to_int (res, typ))) in
               counter_inc ();
               Some (bitcast (res, float_sized_int) float_type)
           | Cnegf ->
               let mask = Nativeint.to_string (Nativeint.of_string ("0x8" ^ String.make (2 * Arch.size_int - 1) '0')) in
-              let (res,_) = binop "xor" float_sized_int mask (to_int (res,typ) float_sized_int) in
+              let (res,_) = binop "xor" float_sized_int mask (fst (to_int (res,typ))) in
               counter_inc ();
               Some (bitcast (res, float_sized_int) float_type)
           | Cload mem ->
               let (res,typ) = load (to_addr (res, typ) (translate_mem mem ^ "*"), translate_mem mem ^ "*") in
               if not (is_float typ)
-              then Some (to_int (res, typ) int_type, int_type)
+              then Some (adjust_length (res, typ) int_type)
               else Some (res, typ) (* TODO this has to be changed to reflect the actual type *)
           | _ -> raise (Llvm_error "wrong op")
         end
@@ -429,14 +543,23 @@ and compile_operation op exprs =
     end
   | _ -> raise (Llvm_error "There is no operator with this number of arguments")
 
-let argument_list args = String.concat ", " (List.map (fun (id, _) -> addr_type ^ " %" ^ Ident.name id) args)
+let argument_list args = String.concat ", " (List.map (fun (id, _) -> addr_type ^ " %" ^ translate_symbol (Ident.name id)) args)
+
+let emit_function_declarations () =
+  List.iter (fun (name, args) -> print_endline ("declare " ^ addr_type ^ " @" ^ name ^
+                                     "(" ^ String.concat "," args ^ ")")) !functions
+let emit_constant_declarations () =
+  List.iter (fun name -> print_endline ("@" ^ name ^ " = external global " ^ int_type)) !constants
 
 let compile_fundecl fd_cmm =
+  counter := 0;
+  try
   match fd_cmm with
     ({fun_name=name; fun_args=args; fun_body=body; fun_fast=fast}) ->
       current_args := List.map (fun (id, _) -> Ident.name id) args;
-      ignore (List.map (fun (id, typ) -> Hashtbl.add tbl (Ident.name id) addr_type) args);
-      emit ("\ndefine " ^ addr_type ^ " @" ^ name ^ "(" ^ argument_list args ^ ") gc \"ocaml\" {");
+      Hashtbl.clear types;
+      ignore (List.map (fun (id, typ) -> Hashtbl.add types (Ident.name id) addr_type) args);
+      emit ("\ndefine cc 11 " ^ addr_type ^ " @" ^ name ^ "(" ^ argument_list args ^ ") gc \"ocaml\" {");
       emit ("entry:");
       begin
         match compile_expr body with
@@ -444,70 +567,12 @@ let compile_fundecl fd_cmm =
         | _ -> raise (Llvm_error "compiling body failed")
       end;
       emit "}"
+  with Llvm_error s -> print_endline s;
+                       emit_function_declarations ();
+                       emit_function_declarations ();
+                       print_endline (String.concat "\n" (List.rev !instrs));
+                       raise (Llvm_error s)
 
-let translate_data = function
-  | Csingle s -> "float", s
-  | Cdouble s -> float_type, s
-  | Cint8 i -> "i8", string_of_int i
-  | Cint16 i -> "i16", string_of_int i
-  | Cint32 i -> "i32", Nativeint.to_string i
-  | Cint i -> int_type, Nativeint.to_string i
-  | Cstring s -> "[" ^ string_of_int (String.length s) ^ " x i8]", "c\"" ^ s ^ "\""
-  | Calign i -> "void", "align " ^ string_of_int i
-  | Cskip i -> "void", "skip " ^ string_of_int i
-  | Cdefine_symbol s ->
-      let typ = try Hashtbl.find tbl s with Not_found -> "unknown" in
-      typ, s
-  | _ -> "not implemented", "not implemented"
-
-let data_to_string = function
-  | Cdefine_symbol s -> "(define-symbol " ^ s ^ ")"
-  | Cglobal_symbol s -> "(global-symbol " ^ s ^ ")"
-  | Cdefine_label i -> "(define-label " ^ string_of_int i ^ ")"
-  | Cint8 i -> "(int8 " ^ string_of_int i ^ ")"
-  | Cint16 i -> "(int16 " ^ string_of_int i ^ ")"
-  | Cint32 i -> "(int32 " ^ Nativeint.to_string i ^ ")"
-  | Cint i -> "(word " ^ Nativeint.to_string i ^ ")"
-  | Csingle s -> "c\"" ^ s ^ "\""
-  | Cdouble s -> float_type ^ " " ^ s
-  | Csymbol_address s -> "(symbol-address " ^ s ^ ")"
-  | Clabel_address i -> "(label-address " ^ string_of_int i ^ ")"
-  | Cstring s -> "(string " ^ s ^ ")"
-  | Cskip i -> "(skip " ^ string_of_int i ^ ")"
-  | Calign i -> "(align " ^ string_of_int i ^ ")"
-
-let data d =
-  match d with
-  | [] -> emit "; no data"
-  | Cint header :: Cglobal_symbol name :: body ->
-      Hashtbl.add tbl name "i64";
-      let (types, values) = List.fold_left (fun (a,b) (c,d) -> a @ [c], b @ [c ^ " " ^ d]) ([], [])
-                              (List.map translate_data (Cint header :: body)) in
-      emit (";@" ^ name ^ " = global {" ^ String.concat ", " types ^ "} {" ^
-            String.concat ", " values ^ "}")
-  | Cint header :: Cdefine_symbol name :: body ->
-      Hashtbl.add tbl name "i64";
-      let (types, values) = List.fold_left (fun (a,b) (c,d) -> a @ [c], b @ [c ^ " " ^ d]) ([], [])
-                              (List.map translate_data (Cint header :: body)) in
-      emit (";@" ^ name ^ " = global {" ^ String.concat ", " types ^ "} {" ^
-            String.concat ", " values ^ "}")
-  | data -> emit (String.concat " " (List.map data_to_string data))
-(*  emit ("(" ^ String.concat "\n" (List.map (fun x -> counter_inc ();
-  match x with
-  | Cdefine_symbol s -> "@" ^ s ^ " = external global " ^ int_type
-  | Cdefine_label i -> "; label " ^ string_of_int i
-  | Cglobal_symbol s -> "@" ^ s ^ " = external global " ^ int_type
-  | Cint8 i -> "@int" ^ c () ^ " = global " ^ int_type ^ " " ^ string_of_int i ^ " ;8 bit"
-  | Cint16 i -> "@int" ^ c () ^ " = global " ^ int_type ^ " " ^ string_of_int i ^ " ;16 bit"
-  | Cint32 i -> "@int" ^ c () ^ " = global " ^ int_type ^ " " ^ Nativeint.to_string i ^ " ;32 bit"
-  | Cint i -> "@int" ^ c () ^ " = global " ^ int_type ^ " " ^ Nativeint.to_string i ^ " ;word"
-  | Csingle s -> "@single" ^ c () ^ " = global " ^ float_type ^ " " ^ s ^ " ;single precision float"
-  | Cdouble s -> "@double" ^ c () ^ " = global " ^ float_type ^ " " ^ s ^ " ;double precision float"
-  | Csymbol_address s -> "; the following will be defined later: @" ^ s
-  | Clabel_address i -> ";label_address " ^ string_of_int i
-  | Cstring s -> "private constant [" ^ string_of_int (String.length s) ^ " x i8] c\"" ^ s ^ "\""
-  | Cskip i -> ";skip " ^ string_of_int i
-  | Calign i -> ";align " ^ string_of_int i
-  ) d) ^ ")")*)
+let data d = ()
 
 (* vim: set foldenable : *)
