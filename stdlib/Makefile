@@ -55,5 +55,7 @@ camlheader camlheader_ur: header.c ../config/Makefile
 	  cp camlheader camlheader_ur; \
 	fi
 
+.NOTPARALLEL: %.p.cmxa %.cmxa
+
 .PHONY: all allopt allopt-noprof allopt-prof install installopt
 .PHONY: installopt-default installopt-noprof installopt-prof clean depend

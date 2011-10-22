@@ -653,12 +653,12 @@ alldepend::
 
 # The extra libraries
 
-otherlibraries: ocamltools
+otherlibraries: library ocamltools
 	for i in $(OTHERLIBRARIES); do \
 	  (cd otherlibs/$$i; $(MAKE) RUNTIME=$(RUNTIME) all) || exit $$?; \
 	done
 
-otherlibrariesopt:
+otherlibrariesopt: otherlibraries
 	for i in $(OTHERLIBRARIES); do \
 	  (cd otherlibs/$$i; $(MAKE) allopt) || exit $$?; \
 	done
