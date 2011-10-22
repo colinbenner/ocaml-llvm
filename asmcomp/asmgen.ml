@@ -108,6 +108,7 @@ let compile_implementation ?toplevel prefixname ppf (size, lam) =
   begin try
     Emitaux.output_channel := oc;
     Emit.begin_assembly();
+    if !use_llvm then Llvmcompile.emit_header () else ();
     Closure.intro size lam
     ++ Cmmgen.compunit size
     ++ List.iter (compile_phrase ppf) ++ (fun () -> ());
@@ -126,8 +127,6 @@ let compile_implementation ?toplevel prefixname ppf (size, lam) =
       );
 
     if !use_llvm then begin
-    Llvmcompile.emit_function_declarations ();
-    Llvmcompile.emit_constant_declarations ();
     print_endline (Llvmcompile.instructions ());
     end else ();
     Emit.end_assembly();
