@@ -82,7 +82,7 @@ let compile_phrase ppf p =
   if !use_llvm then
   match p with
   | Cfunction fd -> Llvmcompile.compile_fundecl (*ppf*) fd
-  | Cdata dl -> Llvmcompile.data dl
+  | Cdata dl -> begin (*Emit.data dl;*) Llvmcompile.data dl end
   else
   match p with
   | Cfunction fd -> compile_fundecl ppf fd
@@ -107,8 +107,9 @@ let compile_implementation ?toplevel prefixname ppf (size, lam) =
   let oc = open_out asmfile in
   begin try
     Emitaux.output_channel := oc;
-    Emit.begin_assembly();
-    if !use_llvm then Llvmcompile.emit_header () else ();
+    if !use_llvm
+    then Llvmemit.emit_header()
+    else Emit.begin_assembly();
     Closure.intro size lam
     ++ Cmmgen.compunit size
     ++ List.iter (compile_phrase ppf) ++ (fun () -> ());
@@ -126,18 +127,19 @@ let compile_implementation ?toplevel prefixname ppf (size, lam) =
             (List.map Primitive.native_name !Translmod.primitive_declarations))
       );
 
-    if !use_llvm then begin
-    print_endline (Llvmcompile.instructions ());
-    end else ();
-    Emit.end_assembly();
+    if !use_llvm then ()
+    else Emit.end_assembly();
     close_out oc
   with x ->
     close_out oc;
     if !keep_asm_file then () else remove_file asmfile;
     raise x
   end;
+  if !use_llvm then () (* TODO run llvm to assemble the previously generated llvm assembly *)
+  else begin
   if Proc.assemble_file asmfile (prefixname ^ ext_obj) <> 0
-  then raise(Error(Assembler_error asmfile));
+  then raise(Error(Assembler_error asmfile))
+  end;
   if !keep_asm_file then () else remove_file asmfile
 
 (* Error report *)

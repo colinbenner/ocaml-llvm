@@ -80,8 +80,8 @@ ASMCOMP=asmcomp/arch.cmo asmcomp/debuginfo.cmo \
   asmcomp/reloadgen.cmo asmcomp/reload.cmo \
   asmcomp/printlinear.cmo asmcomp/linearize.cmo \
   asmcomp/schedgen.cmo asmcomp/scheduling.cmo \
-  asmcomp/llvmcompile.cmo \
-  asmcomp/emitaux.cmo asmcomp/emit.cmo asmcomp/asmgen.cmo \
+  asmcomp/emitaux.cmo asmcomp/llvmemit.cmo asmcomp/llvmcompile.cmo \
+  asmcomp/emit.cmo asmcomp/asmgen.cmo \
   asmcomp/asmlink.cmo asmcomp/asmlibrarian.cmo asmcomp/asmpackager.cmo
 
 DRIVER=driver/pparse.cmo driver/errors.cmo driver/compile.cmo \
